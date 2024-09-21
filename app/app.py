@@ -6,7 +6,7 @@ import psycopg2
 from psycopg2 import sql
 from panoramisk import Manager
 
-# Configuração do Manager do AMI
+
 manager = Manager(
     loop=asyncio.get_event_loop(),
     host=os.environ['AMI_HOST'],
@@ -15,7 +15,7 @@ manager = Manager(
     secret=os.environ['AMI_PASSWORD']
 )
 
-# Configuração de Log
+
 logger = logging.getLogger('AMI')
 logger.setLevel(logging.DEBUG)
 ch = logging.StreamHandler()
@@ -74,7 +74,7 @@ class PostgresDB:
             log(f"❌ Erro ao inserir agente: {error}", level='error')
             self.connection.rollback()
 
-    def remove_agent(self, uniqueid):
+    def remove_agent(self, fila, ramal):
         """Remove um agente da tabela monitoring_agents."""
         if not self.connection:
             log("❌ Sem conexão com o banco de dados.", level='error')
@@ -82,11 +82,11 @@ class PostgresDB:
 
         try:
             delete_query = """
-            DELETE FROM monitoring_agents WHERE uniqueid = %s;
+            DELETE FROM monitoring_agents WHERE fila = %s AND ramal = %s;
             """
-            self.cursor.execute(delete_query, (uniqueid,))
+            self.cursor.execute(delete_query, (fila,ramal))
             self.connection.commit()
-            log(f"✅ Agente com uniqueid '{uniqueid}' removido com sucesso da tabela 'monitoring_agents'.")
+            log(f"✅ Agente com ramal '{ramal}' removido com sucesso da fila '{fila}'")
         except (Exception, psycopg2.DatabaseError) as error:
             log(f"❌ Erro ao remover agente: {error}", level='error')
             self.connection.rollback()
@@ -118,7 +118,7 @@ class PostgresDB:
             log(f"❌ Erro ao atualizar status do agente: {error}", level='error')
             self.connection.rollback()
 
-# Inicialização do banco de dados com variáveis de ambiente
+
 db = PostgresDB(
     host=os.environ['DB_HOST'],
     port=int(os.environ['DB_PORT']),
@@ -134,11 +134,11 @@ def handle_user_event(manager, message):
     user_event = data.get('UserEvent', '')
 
     if user_event == 'AGENTLOGIN':
-        uniqueid = data.get('Id')  # Usando 'Id' como uniqueid
+        uniqueid = data.get('Id')  
         fila = data.get('Fila')
         agente = data.get('Agente')
         ramal = data.get('Ramal')
-        logado_desde = data.get('Id')  # Assumindo que 'Id' representa um timestamp válido
+        logado_desde = data.get('Id')  
 
         if all([uniqueid, fila, agente, ramal, logado_desde]):
             db.insert_agent(uniqueid, fila, agente, ramal, logado_desde)
@@ -146,10 +146,11 @@ def handle_user_event(manager, message):
             log(f"⚠️ Dados insuficientes para AGENTLOGIN: {data}", level='warning')
 
     elif user_event == 'AGENTLOGOFF':
-        uniqueid = data.get('Uniqueid')
+        fila  = data.get('Fila')
+        ramal = data.get('Ramal')
 
-        if uniqueid:
-            db.remove_agent(uniqueid)
+        if all([fila,ramal]):
+            db.remove_agent(fila, ramal)
         else:
             log(f"⚠️ Dados insuficientes para AGENTLOGOFF: {data}", level='warning')
     else:
@@ -171,51 +172,29 @@ def handle_queue_member_status(manager, message):
         log(f"⚠️ Dados insuficientes para QueueMemberStatus: {data}", level='warning')
         return
 
-    # Extrair o ramal do campo 'Interface', exemplo: 'Local/101@interno_realtime' → '101'
+    
     try:
         ramal = interface.split('/')[1].split('@')[0]
     except IndexError:
         log(f"⚠️ Formato inesperado para 'Interface': {interface}", level='warning')
         return
 
-    # Converter 'LastCall' para timestamp se não for zero, caso contrário, NULL
+    
     if last_call.isdigit() and int(last_call) > 0:
         ultima_chamada = last_call
     else:
-        ultima_chamada = None  # Ou você pode optar por não atualizar este campo
+        ultima_chamada = None  
 
-    # Converter 'CallsTaken' e 'Status' para inteiros
+    
     try:
         chamadas = int(calls_taken)
         status_int = int(status)
     except ValueError:
         log(f"⚠️ Valores inválidos para 'CallsTaken' ou 'Status': {data}", level='warning')
         return
-
-    # Atualizar a tabela apenas se 'ultima_chamada' não for None
-    if ultima_chamada is not None:
-        db.update_agent_status(queue, ramal, chamadas, ultima_chamada, status_int)
-    else:
-        # Atualizar sem modificar 'ultima_chamada'
-        try:
-            update_query = """
-            UPDATE monitoring_agents
-            SET
-                fila = %s,
-                chamadas = %s,
-                status = %s
-            WHERE
-                fila = %s AND ramal = %s;
-            """
-            db.cursor.execute(update_query, (queue, chamadas, status_int, queue, ramal))
-            if db.cursor.rowcount > 0:
-                db.connection.commit()
-                log(f"✅ Atualizado status do agente na fila {queue} e ramal {ramal} (sem 'ultima_chamada').")
-            else:
-                log(f"⚠️ Nenhum agente encontrado na fila {queue} e ramal {ramal} para atualizar.", level='warning')
-        except (Exception, psycopg2.DatabaseError) as error:
-            log(f"❌ Erro ao atualizar status do agente: {error}", level='error')
-            db.connection.rollback()
+    
+    db.update_agent_status(queue, ramal, chamadas, ultima_chamada, status_int)
+    
 
 def main():
     log("🔄 Iniciando o Manager do AMI...")
