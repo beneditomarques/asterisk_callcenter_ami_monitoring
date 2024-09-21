@@ -1,0 +1,2 @@
+panoramisk==1.4
+psycopg2==2.9.9
